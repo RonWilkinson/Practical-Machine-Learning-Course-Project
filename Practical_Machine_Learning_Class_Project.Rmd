@@ -1,0 +1,152 @@
+---
+title: "Practical Machine Learning Class Project"
+author: "Ronald Wilkinson"
+date: "September 23, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Background
+
+The data for this project come from this source: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har.  
+  
+The paper describing the circumstances under which the data was collected is: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013  
+  
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+  
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. Participants were supervised by an experienced weight lifter to make sure the execution complied to the manner they were supposed to simulate. The exercises were performed by six male participants aged between 20-28 years, with little weight lifting experience. We made sure that all participants could easily simulate the mistakes in a safe and controlled manner by using a relatively light dumbbell (1.25kg).
+  
+![Sensor Placement](bodysensors.png)
+  
+## Data Preparation
+  
+```{r echo=FALSE}
+
+library(caret, quietly=TRUE, warn.conflicts = FALSE)
+library(dplyr, quietly=TRUE, warn.conflicts = FALSE)
+
+setwd("P:/Programs/R/Practical Machine Leaning/Data")
+pml.df <- read.csv("pml-training.csv")
+```
+
+
+The raw data set has a mixture of detail and summary measures from the sensors.  There are also instances of invalid data values.  The summary measures are only included for those data rows that are marked with new_window="yes" and are presumably summaries of the detail data presented in the new_window="no" rows for each corresponding time window. 
+
+In this analysis, I choose to use only the data appearing in the detail rows, both because it appears to be more complete and because presumably the information in the summary rows is inherent in the details and can be exploited as needed implicitly or explicitly by the prediction algorithms.
+
+The revised dataset has only detail rows (new_window="no") and the summary measure columns (those with avg, stddev, var, skewness, kurtosis, magnet tags) removed, because those columns contain no data for the detail rows.    
+```{r echo=FALSE, cache=TRUE}
+library(bindrcpp, quietly=TRUE)
+
+pmlf.df <- filter(pml.df,new_window=="no")
+
+pmlfc.df <- select(pmlf.df,-contains("min_"),-contains("max_"),-contains("avg_"),
+                -contains("var_"),-contains("amplitude_"),-contains("stddev_"),
+                -contains("skewness_"),-contains("kurtosis_"))
+```
+  
+The 52 sensor variables in the revised data set are:  
+  
+|Rotation variables: | roll | pitch | yaw | gyros x | gyros y | gyros z|  
+|:----------------|:------:|:-------:|:-----:|:--------:|:--------:|:-------:|  
+|**arm**|x|x|x|x|x|x|  
+|**forearm**|x|x|x|x|x|x|  
+|**belt**|x|x|x|x|x|x|  
+|**dumbbell**|x|x|x|x|x|x|  
+  
+|Translation variables: |accel x|accel y | accel z| total accel | magnet x | magnet y |magnet z|  
+|:----------------|:------:|:-------:|:-----:|:--------:|:--------:|:-------:|:--------:|  
+|**arm**|x|x|x|x|x|x|x|  
+|**forearm**|x|x|x|x|x|x|x|  
+|**belt**|x|x|x|x|x|x|x|x|  
+|**dumbbell**|x|x|x|x|x|x|x|  
+  
+  
+Next, we divide the data set into training and validation subsets using an 80/20 randomized split. Models based on the training subset will be used to make predictions on the validation subset as a test of the robustness of the models on new data.
+  
+```{r cache=TRUE}
+set.seed(1234)
+
+train.index <- createDataPartition(pmlfc.df$classe,p=0.80,list=FALSE)
+
+pmlfc.mytrain <- pmlfc.df[train.index,]
+pmlfc.myvalidate <- pmlfc.df[-train.index,]
+
+```
+  
+This yields a training data set with `r dim(pmlfc.mytrain)[1]` cases and a validation set with `r dim(pmlfc.myvalidate)[1]` cases.
+  
+## Data Analysis  
+  
+### Preprocessing  
+  
+The intent is to identify the exercise quality category represented by the classe variable from the values of the motion sensor variables. The 52 motion sensor variables present may reasonably be thought to contain overlapping information.  For example, the roll, pitch, and yaw variables are related to the gyros x,y, and z variables in measuring rotation and the magnet variables are related to the non-gyro x,y, and z variables in measuring translational motion. Therefore, it is reasonable to see if we can represent the information more efficiently with fewer variables via principal component analysis.
+  
+```{r cache=TRUE}
+orig.metrics.mytrain <- select(pmlfc.mytrain, roll_belt:magnet_forearm_z)
+
+preprocess.mytrain <- preProcess(orig.metrics.mytrain, method="pca")
+
+preprocess.mytrain
+```  
+  
+Since principal component analysis has successfully explained 95% of the variation in the 52 original motion variables in only 25 components, we choose to prepare the 25 component predictor variables for training the model. 
+  
+```{r cache=TRUE}
+pca.predictors.mytrain <- predict(preprocess.mytrain, orig.metrics.mytrain)
+
+pca.mytrain.df <- cbind(classe=pmlfc.mytrain$classe, pca.predictors.mytrain)
+```
+  
+### Training  
+  
+Deciding upon one of five exercise quality categories from many continuous predictor variables is a kind of problem for which random forests is well suited.  We therefore specify using random forests to train the model.
+  
+```{r cache=TRUE}
+
+rf.fit.pca.mytrain <- train(classe ~ .,data=pca.mytrain.df, method="rf")
+```
+  
+### Model Performance  
+  
+Within the training set, the random forest model using principal component motion sensor predictors makes perfect exercise quality class predictions.
+  
+```{r}
+confusionMatrix(predict(rf.fit.pca.mytrain),pca.mytrain.df$classe)
+```
+  
+Next, we use the validation set to see how well the model does with data *not* in the training set.  This requires three steps.
+  
+  1. Preprocess the validation data with the preprocess algorithm created with the training data. 
+```{r cache=TRUE}
+orig.metrics.myvalidate <- select(pmlfc.myvalidate, roll_belt:magnet_forearm_z)
+
+pca.predictors.myvalidate <- predict(preprocess.mytrain, orig.metrics.myvalidate)
+
+pca.myvalidate.df <- cbind(classe=pmlfc.myvalidate$classe, pca.predictors.myvalidate)
+
+```
+  
+  2. Run the preprocessed validation data through the random forest model created from the training data.  
+  
+```{r cache=TRUE}
+
+predictions.myvalidate <- predict(rf.fit.pca.mytrain, newdata=pca.myvalidate.df)
+
+```
+  
+ 3. Compare the predictions with the actual classes from the validation data set.  
+ 
+```{r}
+
+cm.myvalidate <- confusionMatrix(predictions.myvalidate, pca.myvalidate.df$classe)
+cm.myvalidate
+
+```
+  
+It is evident that the random forest model works well with the validation data set with an overall accuracy rate of `r round(cm.myvalidate$overall[1], 2)`.
+  
+
+
